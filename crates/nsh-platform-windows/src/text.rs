@@ -29,7 +29,7 @@ use std::{
     ffi::c_void,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -60,12 +60,13 @@ use windows::{
                 DWRITE_FONT_FEATURE_TAG, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL,
                 DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_WEIGHT, DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN,
-                DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_HIT_TEST_METRICS,
-                DWRITE_INLINE_OBJECT_METRICS, DWRITE_LINE_METRICS,
+                DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_GRID_FIT_MODE_DEFAULT,
+                DWRITE_HIT_TEST_METRICS, DWRITE_INLINE_OBJECT_METRICS, DWRITE_LINE_METRICS,
                 DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
-                DWRITE_MEASURING_MODE_NATURAL, DWRITE_OVERHANG_METRICS,
+                DWRITE_MEASURING_MODE_NATURAL, DWRITE_OVERHANG_METRICS, DWRITE_PIXEL_GEOMETRY_RGB,
                 DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_READING_DIRECTION_RIGHT_TO_LEFT,
-                DWRITE_STRIKETHROUGH, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
+                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_STRIKETHROUGH,
+                DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
                 DWRITE_TEXT_ALIGNMENT_JUSTIFIED, DWRITE_TEXT_ALIGNMENT_LEADING,
                 DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
                 DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
@@ -74,8 +75,8 @@ use windows::{
                 IDWriteFactory2, IDWriteFactory5, IDWriteFontCollection, IDWriteFontCollection1,
                 IDWriteFontFace, IDWriteFontFace2, IDWriteFontFallback, IDWriteFontFile,
                 IDWriteInMemoryFontFileLoader, IDWriteInlineObject, IDWriteInlineObject_Impl,
-                IDWritePixelSnapping_Impl, IDWriteTextFormat, IDWriteTextFormat1,
-                IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextRenderer,
+                IDWritePixelSnapping_Impl, IDWriteRenderingParams, IDWriteTextFormat,
+                IDWriteTextFormat1, IDWriteTextLayout, IDWriteTextLayout1, IDWriteTextRenderer,
                 IDWriteTextRenderer_Impl, IDWriteTypography,
             },
         },
@@ -90,6 +91,32 @@ use crate::{
     render::{DrawCx, rect_f},
     view::{NshView, ViewState},
 };
+
+/// Custom DirectWrite rendering params shared by every `DrawGlyphRun`:
+/// the system's ClearType values with a modest enhanced-contrast bump, so
+/// text carries the weight browsers give it instead of DirectWrite's
+/// thinner default.
+fn text_rendering_params() -> &'static IDWriteRenderingParams {
+    static PARAMS: OnceLock<IDWriteRenderingParams> = OnceLock::new();
+    PARAMS.get_or_init(|| {
+        let factory = crate::gfx::dwrite();
+        // SAFETY: a COM call on the live shared factory.
+        unsafe {
+            factory
+                .CreateCustomRenderingParams(
+                    2.2,
+                    4.0,
+                    4.0,
+                    1.0,
+                    DWRITE_PIXEL_GEOMETRY_RGB,
+                    DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                    DWRITE_GRID_FIT_MODE_DEFAULT,
+                )
+                .unwrap()
+                .into()
+        }
+    })
+}
 
 /// The line pitch DirectWrite lays lines out on, and the baseline in each
 /// line: any constant works, since lines are stacked again from their
@@ -2241,6 +2268,8 @@ impl Painter<'_> {
         // Snap the baseline to whole device pixels; fractional origins blur
         // glyphs vertically, unlike browsers which anchor them to the grid.
         let y = (y / self.px).round() * self.px;
+        // SAFETY: a COM call between BeginDraw and EndDraw.
+        unsafe { self.dc.SetTextRenderingParams(text_rendering_params()) };
         let run = DWRITE_GLYPH_RUN {
             // SAFETY: borrowed without a reference: the run does not
             // outlive `face` and never releases it (`ManuallyDrop`).
