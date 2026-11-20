@@ -2238,6 +2238,9 @@ impl Painter<'_> {
         if glyphs.is_empty() || color.is_transparent() {
             return;
         }
+        // Snap the baseline to whole device pixels; fractional origins blur
+        // glyphs vertically, unlike browsers which anchor them to the grid.
+        let y = (y / self.px).round() * self.px;
         let run = DWRITE_GLYPH_RUN {
             // SAFETY: borrowed without a reference: the run does not
             // outlive `face` and never releases it (`ManuallyDrop`).
